@@ -1,67 +1,103 @@
 import tkinter as tk
-from tkinter import *
 from tkinter import ttk, messagebox
+import subprocess
+import sys
+import serial
+import simpleaudio as sa  # For playing WAV files
+import wave
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-class MyApp(tk.Tk):
+class AudioGUI(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        # Set window title and size
-        self.title("Dysphagia Screener")
-        self.geometry("1200x900")  # Width x Height
+        self.title("Piezo Mic Recorder")
+        self.geometry("600x500")
 
-        # Configure menu bar
-        self.create_menu()
+        # Recording state and process handle
+        self.recording = False
+        self.recording_process = None
 
-        # Main Frame
-        self.main_frame = ttk.Frame(self, padding=10)
-        self.main_frame.pack(expand=True, fill="both")
+        # Start/Stop Recording Button
+        self.record_btn = ttk.Button(self, text="Start Recording", command=self.toggle_recording)
+        self.record_btn.grid(row=0, column=0, pady=10, padx=20)
 
-        # Add widgets here  
-        self.create_widgets()
+        # Play Audio Button
+        self.play_btn = ttk.Button(self, text="Play Audio", command=self.play_audio)
+        self.play_btn.grid(row=1, column=0, pady=10)
 
-        # Status Bar
-        self.status = tk.StringVar(value="Ready")
-        self.status_bar = ttk.Label(self, textvariable=self.status, relief=tk.SUNKEN, anchor="w")
-        self.status_bar.pack(side="bottom", fill="x")
+        # Matplotlib Figure for Waveform Display
+        self.fig, self.ax = plt.subplots(figsize=(5, 2))
+        self.canvas = FigureCanvasTkAgg(self.fig, self)
+        self.canvas.get_tk_widget().grid(row=2, column=0, pady=10)
 
-    def create_menu(self):
-        """Create a menu bar for the application"""
-        menubar = tk.Menu(self)
+        # ML Interpretation Toggle
+        self.ml_enabled = tk.BooleanVar()
+        self.ml_toggle_btn = ttk.Checkbutton(self, text="Enable ML Interpretation", variable=self.ml_enabled)
+        self.ml_toggle_btn.grid(row=3, column=0, pady=10)
 
-        # File Menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="New", command=self.dummy_action)
-        file_menu.add_command(label="Open", command=self.dummy_action)
-        file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
+        # Ensure a clean exit
+        self.protocol("WM_DELETE_WINDOW", self.safe_exit)
 
-        # Help Menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="About", command=self.show_about)
-        menubar.add_cascade(label="Help", menu=help_menu)
+    def toggle_recording(self):
+        """
+        Toggle recording:
+        - When starting, launch recording.py using subprocess.
+        - When stopping, terminate the external process (if still running).
+        """
+        if not self.recording:
+            self.recording = True
+            self.record_btn.config(text="Stop Recording")
+            try:
+                # Launch recording.py using the same Python interpreter as app.py
+                self.recording_process = subprocess.Popen([sys.executable, "recording.py"])
+                print("Recording started via external script.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to start recording script:\n{e}")
+                self.recording = False
+                self.record_btn.config(text="Start Recording")
+        else:
+            self.recording = False
+            self.record_btn.config(text="Start Recording")
+            # Terminate the recording process if it's still running
+            if self.recording_process is not None:
+                self.recording_process.terminate()
+                self.recording_process = None
+                print("Recording process terminated.")
 
-        self.config(menu=menubar)
+    def play_audio(self):
+        """Play the recorded audio file."""
+        try:
+            wave_obj = sa.WaveObject.from_wave_file("output_raw.wav")
+            wave_obj.play()
+        except Exception as e:
+            print(f"Error playing audio: {e}")
+            messagebox.showerror("Error", "Could not play audio.")
 
-    def create_widgets(self):
-        """Create widgets inside the main frame"""
-        ttk.Label(self.main_frame, text="Welcome to Tkinter GUI!").pack(pady=10)
-        ttk.Button(self.main_frame, text="Click Me", command=self.on_button_click).pack(pady=5)
+    def plot_waveform(self, file_path="output_raw.wav"):
+        """Load and display the waveform from a .wav file."""
+        try:
+            with wave.open(file_path, "rb") as wav_file:
+                frames = wav_file.readframes(-1)
+                audio_signal = np.frombuffer(frames, dtype=np.int16)
+                self.ax.clear()
+                self.ax.plot(audio_signal, color="blue")
+                self.ax.set_title("Waveform")
+                self.canvas.draw()
+        except Exception as e:
+            print(f"Error plotting waveform: {e}")
+            messagebox.showerror("Error", "Could not load waveform.")
 
-    def on_button_click(self):
-        """Handle button click event"""
-        self.status.set("Button Clicked!")
-        messagebox.showinfo("Message", "You clicked the button!")
-
-    def show_about(self):
-        """Display About information"""
-        messagebox.showinfo("About", "Tkinter GUI Application\nVersion 1.0\nCross-Platform Ready")
-
-    def dummy_action(self):
-        """Placeholder for menu actions"""
-        messagebox.showinfo("Info", "This is a placeholder action")
+    def safe_exit(self):
+        """Cleanly exit the application."""
+        print("Closing application...")
+        if self.recording_process is not None:
+            self.recording_process.terminate()
+        self.destroy()
+        self.quit()
 
 if __name__ == "__main__":
-    app = MyApp()
+    app = AudioGUI()
     app.mainloop()
