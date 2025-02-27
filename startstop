@@ -1,1 +1,114 @@
+import subprocess
+import sys
+import serial
+import wave
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import tkinter as tk
+from threading import Thread
+
+# Define the serial port and baud rate
+port = '/dev/tty.usbmodem138234301'  # Adjust this to match your port
+baud_rate = 115200  # Must match the Arduino baud rate
+
+# Parameters for audio file
+sample_rate = 44100  # Hz
+sample_width = 2     # 16-bit audio
+num_channels = 1     # Mono audio
+
+recording = False  # Global variable to control recording
+
+def log_message(message):
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}")
+
+def normalize_data(data, max_value, sample_width):
+    max_amplitude = (2 ** (sample_width * 8 - 1)) - 1
+    data_array = np.array(data, dtype=np.float32)
+    normalized_data = np.int16(data_array * max_amplitude / max_value)
+    return normalized_data.tobytes()
+
+def plot_data(data_buffer):
+    plt.figure(figsize=(10, 4))
+    plt.plot(data_buffer)
+    plt.title('Audio Data over Time')
+    plt.xlabel('Sample Number')
+    plt.ylabel('Analog Value')
+    plt.grid()
+    plt.show()
+
+def plot_frequency_spectrum(data_buffer):
+    fft_data = np.fft.fft(data_buffer)
+    fft_magnitude = np.abs(fft_data)
+    freqs = np.fft.fftfreq(len(data_buffer), 1 / sample_rate)
+    positive_freqs = freqs[:len(freqs)//2]
+    positive_magnitude = fft_magnitude[:len(fft_magnitude)//2]
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(positive_freqs, positive_magnitude)
+    plt.title('Frequency Spectrum')
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.grid()
+    plt.show()
+
+def record_audio():
+    global recording
+    log_message("Waiting for Start button...")
+    all_data_buffer = []
+    
+    try:
+        with serial.Serial(port, baud_rate, timeout=1) as ser:
+            log_message("Connected to serial port.")
+            while recording:
+                if ser.in_waiting > 0:
+                    line = ser.readline().decode('utf-8').strip()
+                    if line.isdigit():
+                        data_value = int(line)
+                        all_data_buffer.append(data_value)
+    except serial.SerialException as e:
+        log_message(f"Serial exception: {e}")
+    except Exception as e:
+        log_message(f"Unexpected error: {e}")
+    
+    if all_data_buffer:
+        log_message("Saving recorded data to output_raw.wav.")
+        try:
+            with wave.open('output_raw.wav', 'wb') as audio_file:
+                audio_file.setnchannels(num_channels)
+                audio_file.setsampwidth(sample_width)
+                audio_file.setframerate(sample_rate)
+                normalized_data = normalize_data(all_data_buffer, 1023, sample_width)
+                audio_file.writeframes(normalized_data)
+        except Exception as e:
+            log_message(f"Error writing WAV file: {e}")
+    
+    plot_data(all_data_buffer)
+    plot_frequency_spectrum(all_data_buffer)
+    log_message("Recording finished.")
+
+def start_recording():
+    global recording
+    if not recording:
+        recording = True
+        log_message("Recording started...")
+        Thread(target=record_audio, daemon=True).start()
+
+def stop_recording():
+    global recording
+    recording = False
+    log_message("Recording stopped.")
+
+# Create GUI
+root = tk.Tk()
+root.title("Audio Recorder")
+
+tk.Label(root, text="Arduino Audio Recorder", font=("Arial", 14)).pack(pady=10)
+
+tk.Button(root, text="Start Recording", command=start_recording, bg="green", fg="white", font=("Arial", 12)).pack(pady=5)
+tk.Button(root, text="Stop Recording", command=stop_recording, bg="red", fg="white", font=("Arial", 12)).pack(pady=5)
+
+tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=10)
+
+root.mainloop()
 
