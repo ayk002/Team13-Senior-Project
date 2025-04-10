@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import tkinter as tk
 from threading import Thread
+import subprocess  # NEW: Used to call the ML script
+import sys
 
 # Parameters for audio
 sample_rate = 44100  # Hz
@@ -106,7 +108,6 @@ def record_audio():
     except Exception as e:
         log_message(f"Error writing processed WAV file: {e}")
     
-    # Schedule plotting in the main thread using root.after()
     root.after(0, plot_data)
     root.after(0, plot_frequency_spectrum)
     
@@ -124,6 +125,42 @@ def stop_recording():
     recording = False
     log_message("Recording stopped.")
 
+# NEW: Define the analyze_audio function to call the ML script with inputs
+def analyze_audio():
+    """
+    Call the ML script (rfcmodel.py) with the processed .wav file,
+    age, and gender as command line arguments.
+    Expected command line format:
+      python rfcmodel.py "path to .wav file" "age" gender
+      e.g., python rfcmodel.py "output_processed.wav" 51 male
+    """
+    # Retrieve age from entry widget
+    age_str = age_entry.get().strip()
+    if not age_str.isdigit():
+        log_message("Please enter a valid age (numeric).")
+        return
+    # Retrieve and validate gender selection (ML requires 'male' or 'female')
+    gender = gender_var.get().lower()
+    if gender not in ["male", "female"]:
+        log_message("Please select a valid gender (Male or Female) for analysis.")
+        return
+
+    # Processed .wav file path
+    wav_file = "output_Sp.wav"
+    
+    # NEW: Construct command with sys.executable so that the same interpreter is used
+    command = [sys.executable, "rfcmodel.py", wav_file, age_str, gender]
+    log_message(f"Running ML analysis: {' '.join(command)}")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+        log_message("ML Analysis Output:")
+        log_message(result.stdout)
+        if result.stderr:
+            log_message("ML Analysis Errors:")
+            log_message(result.stderr)
+    except Exception as e:
+        log_message(f"ML Analysis error: {e}")
+
 # Create GUI
 root = tk.Tk()
 root.title("Dysphagia Detection Device")
@@ -134,22 +171,26 @@ tk.Button(root, text="Start Recording", command=start_recording, bg="green", fg=
 tk.Button(root, text="Stop Recording", command=stop_recording, bg="red", fg="black", font=("Arial", 12)).pack(pady=5)
 tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=10)
 
-# --- Added Radiobuttons for Biological Sex Selection ---
-# Create a frame to hold the radiobuttons
+# --- Add radiobuttons for user's biological sex ---
 gender_frame = tk.Frame(root)
 gender_frame.pack(pady=10)
 
-# Label for the radiobuttons
 tk.Label(gender_frame, text="Select Biological Sex:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0, 10))
-
-# Create a Tkinter StringVar to hold the selection with default set to 'N/A'
+# Create a Tkinter StringVar to hold the selected value; default set to 'N/A'
 gender_var = tk.StringVar(value="N/A")
-
-# Create the radiobuttons
+# Create radiobuttons that update gender_var accordingly
 tk.Radiobutton(gender_frame, text="Male", variable=gender_var, value="Male", font=("Arial", 12)).pack(side=tk.LEFT)
 tk.Radiobutton(gender_frame, text="Female", variable=gender_var, value="Female", font=("Arial", 12)).pack(side=tk.LEFT)
 tk.Radiobutton(gender_frame, text="N/A", variable=gender_var, value="N/A", font=("Arial", 12)).pack(side=tk.LEFT)
 
-# The variable 'gender_var' will hold the selection for later use in your ML code
+# NEW: Add entry for Age and a button to trigger ML analysis
+analysis_frame = tk.Frame(root)  # NEW:
+analysis_frame.pack(pady=10)  # NEW:
+
+tk.Label(analysis_frame, text="Enter Age:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0, 10))  # NEW:
+age_entry = tk.Entry(analysis_frame, font=("Arial", 12), width=5)  # NEW:
+age_entry.pack(side=tk.LEFT)  # NEW:
+
+tk.Button(analysis_frame, text="Analyze", command=analyze_audio, font=("Arial", 12)).pack(side=tk.LEFT, padx=10)  # NEW:
 
 root.mainloop()
