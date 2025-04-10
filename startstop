@@ -23,10 +23,18 @@ def normalize_data(data, max_value, sample_width):
     normalized_data = np.int16(data_array * max_amplitude / max_value)
     return normalized_data.tobytes()
 
+def process_audio_data(data):
+    # Basic processing: remove DC offset and normalize
+    data_array = np.array(data, dtype=np.float32)
+    data_array -= np.mean(data_array)  # Remove DC offset
+    max_val = np.max(np.abs(data_array)) or 1  # Avoid divide-by-zero
+    normalized = data_array / max_val
+    return normalized
+
 def plot_data():
     plt.figure(figsize=(10, 4))
     plt.plot(all_data_buffer)
-    plt.title('Simulated Audio Data over Time')
+    plt.title('Processed Waveform')
     plt.xlabel('Sample Number')
     plt.ylabel('Amplitude')
     plt.grid()
@@ -51,16 +59,14 @@ def record_audio():
     global recording, all_data_buffer
     log_message("Simulated recording started...")
     
-    start_time = time.time()  # Capture the start time
+    start_time = time.time()
     
     while recording:
-        # Simulate one sample of audio data at a time
-        sample_data = np.random.randint(0, 1023)  # Simulated audio data (random)
+        sample_data = np.random.randint(0, 1023)
         all_data_buffer.append(sample_data)
         
-        # Write data to file as it is recorded
         elapsed_time = time.time() - start_time
-        if elapsed_time >= 1:  # Every second, write data to file
+        if elapsed_time >= 1:
             try:
                 with wave.open('output_raw.wav', 'wb') as audio_file:
                     audio_file.setnchannels(num_channels)
@@ -69,13 +75,13 @@ def record_audio():
                     normalized_data = normalize_data(all_data_buffer, 1023, sample_width)
                     audio_file.writeframes(normalized_data)
                 log_message(f"Recorded {int(elapsed_time)} seconds of audio")
-                start_time = time.time()  # Reset the start time after writing to the file
+                start_time = time.time()
             except Exception as e:
                 log_message(f"Error writing WAV file: {e}")
         
-        time.sleep(1 / sample_rate)  # Simulate time between samples (1/sample_rate seconds)
+        time.sleep(1 / sample_rate)
 
-    # Finalize the WAV file after the recording is finished
+    # Save final raw WAV file
     try:
         with wave.open('output_raw.wav', 'wb') as audio_file:
             audio_file.setnchannels(num_channels)
@@ -83,16 +89,28 @@ def record_audio():
             audio_file.setframerate(sample_rate)
             normalized_data = normalize_data(all_data_buffer, 1023, sample_width)
             audio_file.writeframes(normalized_data)
-        log_message("Recording finished and saved.")
+        log_message("Raw recording saved as output_raw.wav.")
     except Exception as e:
-        log_message(f"Error writing WAV file: {e}")
+        log_message(f"Error writing raw WAV file: {e}")
+
+    # Process and save processed WAV file
+    try:
+        processed = process_audio_data(all_data_buffer)
+        processed_int16 = np.int16(processed * ((2 ** (sample_width * 8 - 1)) - 1))
+        with wave.open('output_processed.wav', 'wb') as audio_file:
+            audio_file.setnchannels(num_channels)
+            audio_file.setsampwidth(sample_width)
+            audio_file.setframerate(sample_rate)
+            audio_file.writeframes(processed_int16.tobytes())
+        log_message("Processed recording saved as output_processed.wav.")
+    except Exception as e:
+        log_message(f"Error writing processed WAV file: {e}")
     
     # Schedule plotting in the main thread using root.after()
     root.after(0, plot_data)
     root.after(0, plot_frequency_spectrum)
     
-    # Notify GUI when done
-    audio_queue.append("Recording complete")  # Notify GUI when done
+    audio_queue.append("Recording complete")
     recording = False
 
 def start_recording():
@@ -116,19 +134,22 @@ tk.Button(root, text="Start Recording", command=start_recording, bg="green", fg=
 tk.Button(root, text="Stop Recording", command=stop_recording, bg="red", fg="black", font=("Arial", 12)).pack(pady=5)
 tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=10)
 
-# --- Add radiobuttons for biological sex ---
+# --- Added Radiobuttons for Biological Sex Selection ---
+# Create a frame to hold the radiobuttons
 gender_frame = tk.Frame(root)
 gender_frame.pack(pady=10)
 
+# Label for the radiobuttons
 tk.Label(gender_frame, text="Select Biological Sex:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0, 10))
 
-# Create a Tkinter StringVar to hold the selected value; default set to 'N/A'
+# Create a Tkinter StringVar to hold the selection with default set to 'N/A'
 gender_var = tk.StringVar(value="N/A")
 
-# Create radiobuttons
+# Create the radiobuttons
 tk.Radiobutton(gender_frame, text="Male", variable=gender_var, value="Male", font=("Arial", 12)).pack(side=tk.LEFT)
 tk.Radiobutton(gender_frame, text="Female", variable=gender_var, value="Female", font=("Arial", 12)).pack(side=tk.LEFT)
 tk.Radiobutton(gender_frame, text="N/A", variable=gender_var, value="N/A", font=("Arial", 12)).pack(side=tk.LEFT)
-# The variable 'gender_var' will hold the selection until used in future ML code.
+
+# The variable 'gender_var' will hold the selection for later use in your ML code
 
 root.mainloop()
