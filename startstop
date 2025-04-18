@@ -1,196 +1,262 @@
 import wave
 import time
 import numpy as np
-import matplotlib.pyplot as plt
 import tkinter as tk
+from tkinter import scrolledtext  # for status display
 from threading import Thread
-import subprocess  # NEW: Used to call the ML script
-import sys
+import subprocess  # for calling ML script
+import sys         # to use the same interpreter
+import pyaudio     # for real audio capture and playback
+import signalprocessing  # custom processing module
 
 # Parameters for audio
 sample_rate = 44100  # Hz
 sample_width = 2     # 16-bit audio
 num_channels = 1     # Mono audio
+CHUNK = 1024         # Audio buffer size for recording/playback
 
-recording = False  # Global variable to control recording
-audio_queue = []  # Queue to notify GUI
-all_data_buffer = []  # Store audio data for later plotting
+# Globals
+recording = False            # Control recording state
+audio_queue = []             # Notify GUI
+all_data_buffer = []         # Store raw samples for plotting
+teensy_device_index = None   # Will hold the PyAudio index of the Teensy device
+status_text = None           # Will reference the GUI text widget for logs
+
 
 def log_message(message):
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}")
+    """
+    Log a message with timestamp to the GUI status pane.
+    """
+    timestamped = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}\n"
+    global status_text
+    if status_text:
+        status_text.configure(state='normal')
+        status_text.insert(tk.END, timestamped)
+        status_text.see(tk.END)
+        status_text.configure(state='disabled')
+    else:
+        print(timestamped, end='')
 
-def normalize_data(data, max_value, sample_width):
-    max_amplitude = (2 ** (sample_width * 8 - 1)) - 1
-    data_array = np.array(data, dtype=np.float32)
-    normalized_data = np.int16(data_array * max_amplitude / max_value)
-    return normalized_data.tobytes()
 
-def process_audio_data(data):
-    # Basic processing: remove DC offset and normalize
-    data_array = np.array(data, dtype=np.float32)
-    data_array -= np.mean(data_array)  # Remove DC offset
-    max_val = np.max(np.abs(data_array)) or 1  # Avoid divide-by-zero
-    normalized = data_array / max_val
-    return normalized
+def find_teensy_device(p):
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        name = info.get('name', '')
+        max_in = info.get('maxInputChannels', 0)
+        if max_in > 0 and 'teensy' in name.lower():
+            return i
+    return None
 
-def plot_data():
-    plt.figure(figsize=(10, 4))
-    plt.plot(all_data_buffer)
-    plt.title('Processed Waveform')
-    plt.xlabel('Sample Number')
-    plt.ylabel('Amplitude')
-    plt.grid()
-    plt.show()
+# --- Plotting raw waveform and spectrum as subplots ---
+def plot_subplots():
+    import matplotlib.pyplot as plt
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 
-def plot_frequency_spectrum():
+    ax1.plot(all_data_buffer)
+    ax1.set_title('Raw Waveform')
+    ax1.set_xlabel('Sample Number')
+    ax1.set_ylabel('Amplitude')
+    ax1.grid(True)
+
     fft_data = np.fft.fft(all_data_buffer)
-    fft_magnitude = np.abs(fft_data)
+    mag = np.abs(fft_data)
     freqs = np.fft.fftfreq(len(all_data_buffer), 1 / sample_rate)
-    positive_freqs = freqs[:len(freqs)//2]
-    positive_magnitude = fft_magnitude[:len(fft_magnitude)//2]
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(positive_freqs, positive_magnitude)
-    plt.title('Simulated Frequency Spectrum')
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Magnitude')
-    plt.grid()
+    pos = freqs[:len(freqs)//2]
+    pos_mag = mag[:len(mag)//2]
+
+    ax2.plot(pos, pos_mag)
+    ax2.set_title('Raw Frequency Spectrum')
+    ax2.set_xlabel('Frequency (Hz)')
+    ax2.set_ylabel('Magnitude')
+    ax2.grid(True)
+
+    plt.tight_layout()
     plt.show()
 
+# --- Recording real audio and saving raw WAV ---
 def record_audio():
-    global recording, all_data_buffer
-    log_message("Simulated recording started...")
-    
-    start_time = time.time()
-    
-    while recording:
-        sample_data = np.random.randint(0, 1023)
-        all_data_buffer.append(sample_data)
-        
-        elapsed_time = time.time() - start_time
-        if elapsed_time >= 1:
-            try:
-                with wave.open('output_raw.wav', 'wb') as audio_file:
-                    audio_file.setnchannels(num_channels)
-                    audio_file.setsampwidth(sample_width)
-                    audio_file.setframerate(sample_rate)
-                    normalized_data = normalize_data(all_data_buffer, 1023, sample_width)
-                    audio_file.writeframes(normalized_data)
-                log_message(f"Recorded {int(elapsed_time)} seconds of audio")
-                start_time = time.time()
-            except Exception as e:
-                log_message(f"Error writing WAV file: {e}")
-        
-        time.sleep(1 / sample_rate)
+    global recording, all_data_buffer, teensy_device_index
+    log_message("Recording started—attempting Teensy...")
 
-    # Save final raw WAV file
+    p = pyaudio.PyAudio()
+    if teensy_device_index is None:
+        teensy_device_index = find_teensy_device(p)
+        if teensy_device_index is None:
+            log_message("ERROR: Teensy USB-Audio device not found. Recording aborted.")
+            recording = False
+            p.terminate()
+            return
+        else:
+            info = p.get_device_info_by_index(teensy_device_index)
+            log_message(f"Teensy found: index={teensy_device_index}, name='{info['name']}'")
+
     try:
-        with wave.open('output_raw.wav', 'wb') as audio_file:
-            audio_file.setnchannels(num_channels)
-            audio_file.setsampwidth(sample_width)
-            audio_file.setframerate(sample_rate)
-            normalized_data = normalize_data(all_data_buffer, 1023, sample_width)
-            audio_file.writeframes(normalized_data)
+        stream = p.open(format=pyaudio.paInt16,
+                        channels=num_channels,
+                        rate=sample_rate,
+                        input=True,
+                        frames_per_buffer=CHUNK,
+                        input_device_index=teensy_device_index)
+    except Exception as e:
+        log_message(f"ERROR: Unable to open Teensy audio stream: {e}")
+        recording = False
+        p.terminate()
+        return
+
+    frames = []
+    all_data_buffer.clear()
+    start = time.time()
+
+    while recording:
+        try:
+            data = stream.read(CHUNK)
+        except Exception as e:
+            log_message(f"ERROR: Audio read failed: {e}")
+            break
+        frames.append(data)
+        samples = np.frombuffer(data, dtype=np.int16)
+        all_data_buffer.extend(samples.tolist())
+
+        elapsed = time.time() - start
+        if elapsed >= 1:
+            try:
+                with wave.open('output_raw.wav', 'wb') as wf:
+                    wf.setnchannels(num_channels)
+                    wf.setsampwidth(sample_width)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(b''.join(frames))
+                log_message(f"Recorded {int(elapsed)} seconds from Teensy.")
+                start = time.time()
+            except Exception as e:
+                log_message(f"Error writing raw WAV: {e}")
+
+    try:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+    except:
+        pass
+
+    try:
+        with wave.open('output_raw.wav', 'wb') as wf:
+            wf.setnchannels(num_channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(sample_rate)
+            wf.writeframes(b''.join(frames))
         log_message("Raw recording saved as output_raw.wav.")
     except Exception as e:
-        log_message(f"Error writing raw WAV file: {e}")
+        log_message(f"Error saving raw WAV: {e}")
 
-    # Process and save processed WAV file
     try:
-        processed = process_audio_data(all_data_buffer)
-        processed_int16 = np.int16(processed * ((2 ** (sample_width * 8 - 1)) - 1))
-        with wave.open('output_processed.wav', 'wb') as audio_file:
-            audio_file.setnchannels(num_channels)
-            audio_file.setsampwidth(sample_width)
-            audio_file.setframerate(sample_rate)
-            audio_file.writeframes(processed_int16.tobytes())
-        log_message("Processed recording saved as output_processed.wav.")
+        signalprocessing.process_audio('output_raw.wav')
+        processed_file = signalprocessing.output_file_name
+        log_message(f"Audio processed -> {processed_file}")
     except Exception as e:
-        log_message(f"Error writing processed WAV file: {e}")
-    
-    root.after(0, plot_data)
-    root.after(0, plot_frequency_spectrum)
-    
+        log_message(f"Error in signalprocessing: {e}")
+
+    root.after(0, plot_subplots)
+
     audio_queue.append("Recording complete")
     recording = False
 
+# --- Playback last recording ---
+def play_audio():
+    log_message("Playback started...")
+    try:
+        wf = wave.open('output_raw.wav', 'rb')
+    except FileNotFoundError:
+        log_message("ERROR: No recording found to play.")
+        return
+
+    p = pyaudio.PyAudio()
+    try:
+        stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True)
+        data = wf.readframes(CHUNK)
+        while data:
+            stream.write(data)
+            data = wf.readframes(CHUNK)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        wf.close()
+        log_message("Playback finished.")
+    except Exception as e:
+        log_message(f"Playback error: {e}")
+
+# --- Start/Stop/Play controls ---
 def start_recording():
     global recording
     if not recording:
         recording = True
         Thread(target=record_audio, daemon=True).start()
 
+
 def stop_recording():
     global recording
     recording = False
     log_message("Recording stopped.")
 
-# NEW: Define the analyze_audio function to call the ML script with inputs
+# --- Analyze using ML script on processed file ---
 def analyze_audio():
-    """
-    Call the ML script (rfcmodel.py) with the processed .wav file,
-    age, and gender as command line arguments.
-    Expected command line format:
-      python rfcmodel.py "path to .wav file" "age" gender
-      e.g., python rfcmodel.py "output_processed.wav" 51 male
-    """
-    # Retrieve age from entry widget
     age_str = age_entry.get().strip()
     if not age_str.isdigit():
         log_message("Please enter a valid age (numeric).")
         return
-    # Retrieve and validate gender selection (ML requires 'male' or 'female')
     gender = gender_var.get().lower()
     if gender not in ["male", "female"]:
-        log_message("Please select a valid gender (Male or Female) for analysis.")
+        log_message("Please select Male or Female.")
         return
 
-    # Processed .wav file path
-    wav_file = "output_Sp.wav"
-    
-    # NEW: Construct command with sys.executable so that the same interpreter is used
-    command = [sys.executable, "rfcmodel.py", wav_file, age_str, gender]
-    log_message(f"Running ML analysis: {' '.join(command)}")
+    wav_file = signalprocessing.output_file_name
+    #wav_file = 'output_Sp.wav'
+    cmd = [sys.executable, 'rfcmodel.py', wav_file, age_str, gender]
+    log_message(f"Running ML: {' '.join(cmd)}")
     try:
-        result = subprocess.run(command, capture_output=True, text=True)
-        log_message("ML Analysis Output:")
-        log_message(result.stdout)
-        if result.stderr:
-            log_message("ML Analysis Errors:")
-            log_message(result.stderr)
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        log_message(res.stdout)
+        if res.stderr:
+            log_message(res.stderr)
     except Exception as e:
-        log_message(f"ML Analysis error: {e}")
+        log_message(f"ML error: {e}")
 
-# Create GUI
+# --- GUI Setup ---
 root = tk.Tk()
 root.title("Dysphagia Detection Device")
 
+# Title Label
 tk.Label(root, text="Dysphagia Detection Device", font=("Arial", 14)).pack(pady=10)
 
-tk.Button(root, text="Start Recording", command=start_recording, bg="green", fg="black", font=("Arial", 12)).pack(pady=5)
-tk.Button(root, text="Stop Recording", command=stop_recording, bg="red", fg="black", font=("Arial", 12)).pack(pady=5)
-tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=10)
+# Control Buttons
+tk.Button(root, text="Start Recording", command=start_recording, bg="green", font=("Arial", 12)).pack(pady=5)
+tk.Button(root, text="Stop Recording", command=stop_recording, bg="red", font=("Arial", 12)).pack(pady=5)
+# NEW Play button
+tk.Button(root, text="Play Recording", command=play_audio, bg="blue", fg="white", font=("Arial", 12)).pack(pady=5)
+tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=5)
 
-# --- Add radiobuttons for user's biological sex ---
+# Gender Selection
 gender_frame = tk.Frame(root)
 gender_frame.pack(pady=10)
-
-tk.Label(gender_frame, text="Select Biological Sex:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0, 10))
-# Create a Tkinter StringVar to hold the selected value; default set to 'N/A'
+tk.Label(gender_frame, text="Select Biological Sex:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0,10))
 gender_var = tk.StringVar(value="N/A")
-# Create radiobuttons that update gender_var accordingly
-tk.Radiobutton(gender_frame, text="Male", variable=gender_var, value="Male", font=("Arial", 12)).pack(side=tk.LEFT)
-tk.Radiobutton(gender_frame, text="Female", variable=gender_var, value="Female", font=("Arial", 12)).pack(side=tk.LEFT)
-tk.Radiobutton(gender_frame, text="N/A", variable=gender_var, value="N/A", font=("Arial", 12)).pack(side=tk.LEFT)
+tk.Radiobutton(gender_frame, text="Male", variable=gender_var, value="Male", font=("Arial",12)).pack(side=tk.LEFT)
+tk.Radiobutton(gender_frame, text="Female", variable=gender_var, value="Female", font=("Arial",12)).pack(side=tk.LEFT)
+tk.Radiobutton(gender_frame, text="N/A", variable=gender_var, value="N/A", font=("Arial",12)).pack(side=tk.LEFT)
 
-# NEW: Add entry for Age and a button to trigger ML analysis
-analysis_frame = tk.Frame(root)  # NEW:
-analysis_frame.pack(pady=10)  # NEW:
+# Age Entry & Analyze Button
+analysis_frame = tk.Frame(root)
+analysis_frame.pack(pady=10)
+tk.Label(analysis_frame, text="Enter Age:", font=("Arial",12)).pack(side=tk.LEFT, padx=(0,10))
+age_entry = tk.Entry(analysis_frame, font=("Arial",12), width=5)
+age_entry.pack(side=tk.LEFT)
+tk.Button(analysis_frame, text="Analyze", command=analyze_audio, font=("Arial",12)).pack(side=tk.LEFT, padx=10)
 
-tk.Label(analysis_frame, text="Enter Age:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0, 10))  # NEW:
-age_entry = tk.Entry(analysis_frame, font=("Arial", 12), width=5)  # NEW:
-age_entry.pack(side=tk.LEFT)  # NEW:
-
-tk.Button(analysis_frame, text="Analyze", command=analyze_audio, font=("Arial", 12)).pack(side=tk.LEFT, padx=10)  # NEW:
+# Status pane for log messages
+status_frame = tk.Frame(root)
+status_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=5)
+status_text = scrolledtext.ScrolledText(status_frame, height=8, state='disabled', font=("Arial", 10))
+status_text.pack(fill=tk.BOTH, expand=True)
 
 root.mainloop()
