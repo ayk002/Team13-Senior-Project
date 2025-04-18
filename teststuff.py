@@ -1,42 +1,309 @@
-from tkinter import *
-from tkinter import ttk
+import wave
+import time
+import numpy as np
+import tkinter as tk
+from tkinter import scrolledtext  # for status display
+from threading import Thread
+import subprocess  # for calling ML script
+import sys         # to use the same interpreter
+import pyaudio     # for real audio capture and playback
+import signalprocessing  # custom processing module
 
-class FeetToMeters:
+# Parameters for audio
+sample_rate = 44100  # Hz
+sample_width = 2     # 16-bit audio
+num_channels = 1     # Mono audio
+CHUNK = 1024         # Audio buffer size for recording/playback
 
-    def __init__(self, root):
+# Globals
+recording = False            # Control recording state
+audio_queue = []             # Notify GUI
+all_data_buffer = []         # Store raw samples for plotting
+teensy_device_index = None   # Will hold the PyAudio index of the Teensy device
+status_text = None           # References the GUI text widget for logs
 
-        root.title("Feet to Meters")
 
-        mainframe = ttk.Frame(root, padding="3 3 12 12")
-        mainframe.grid(column=0, row=0, sticky=(N, W, E, S))
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)
-       
-        self.feet = StringVar()
-        feet_entry = ttk.Entry(mainframe, width=7, textvariable=self.feet)
-        feet_entry.grid(column=2, row=1, sticky=(W, E))
-        self.meters = StringVar()
+def log_message(message):
+    """
+    Log a message with timestamp to the GUI status pane.
+    """
+    timestamped = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}\n"
+    global status_text
+    if status_text:
+        status_text.configure(state='normal')
+        status_text.insert(tk.END, timestamped)
+        status_text.see(tk.END)
+        status_text.configure(state='disabled')
+    else:
+        print(timestamped, end='')
 
-        ttk.Label(mainframe, textvariable=self.meters).grid(column=2, row=2, sticky=(W, E))
-        ttk.Button(mainframe, text="Calculate", command=self.calculate).grid(column=3, row=3, sticky=W)
 
-        ttk.Label(mainframe, text="feet").grid(column=3, row=1, sticky=W)
-        ttk.Label(mainframe, text="is equivalent to").grid(column=1, row=2, sticky=E)
-        ttk.Label(mainframe, text="meters").grid(column=3, row=2, sticky=W)
+def find_teensy_device(p):
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        name = info.get('name', '')
+        max_in = info.get('maxInputChannels', 0)
+        if max_in > 0 and 'teensy' in name.lower():
+            return i
+    return None
 
-        for child in mainframe.winfo_children(): 
-            child.grid_configure(padx=5, pady=5)
+# --- Plotting raw waveform and spectrum as subplots ---
+def plot_subplots():
+    import matplotlib.pyplot as plt
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 
-        feet_entry.focus()
-        root.bind("<Return>", self.calculate)
-        
-    def calculate(self, *args):
+    ax1.plot(all_data_buffer)
+    ax1.set_title('Raw Waveform')
+    ax1.set_xlabel('Sample Number')
+    ax1.set_ylabel('Amplitude')
+    ax1.grid(True)
+
+    fft_data = np.fft.fft(all_data_buffer)
+    mag = np.abs(fft_data)
+    freqs = np.fft.fftfreq(len(all_data_buffer), 1 / sample_rate)
+    pos = freqs[:len(freqs)//2]
+    pos_mag = mag[:len(mag)//2]
+
+    ax2.plot(pos, pos_mag)
+    ax2.set_title('Raw Frequency Spectrum')
+    ax2.set_xlabel('Frequency (Hz)')
+    ax2.set_ylabel('Magnitude')
+    ax2.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+# --- Recording real audio and saving raw WAV ---
+def record_audio():
+    global recording, all_data_buffer, teensy_device_index
+    log_message("Recording started—attempting Teensy...")
+
+    p = pyaudio.PyAudio()
+    # Attempt to find Teensy on first run
+    if teensy_device_index is None:
+        teensy_device_index = find_teensy_device(p)
+        if teensy_device_index is not None:
+            info = p.get_device_info_by_index(teensy_device_index)
+            log_message(f"Teensy found: index={teensy_device_index}, name='{info['name']}'")
+        else:
+            log_message("WARNING: Teensy USB-Audio device not found. Using default input device.")
+
+    # Open stream: use Teensy if available, else default mic
+    try:
+        if teensy_device_index is not None:
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=num_channels,
+                            rate=sample_rate,
+                            input=True,
+                            frames_per_buffer=CHUNK,
+                            input_device_index=teensy_device_index)
+        else:
+            default_info = p.get_default_input_device_info()
+            log_message(f"Using default input device: {default_info['name']}")
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=num_channels,
+                            rate=sample_rate,
+                            input=True,
+                            frames_per_buffer=CHUNK)
+    except Exception as e:
+        log_message(f"ERROR: Unable to open audio stream: {e}")
+        recording = False
+        p.terminate()
+        return
+
+    frames = []
+    all_data_buffer.clear()
+    start = time.time()
+
+    while recording:
         try:
-            value = float(self.feet.get())
-            self.meters.set(int(0.3048 * value * 10000.0 + 0.5)/10000.0)
-        except ValueError:
-            pass
+            data = stream.read(CHUNK)
+        except Exception as e:
+            log_message(f"ERROR: Audio read failed: {e}")
+            break
+        frames.append(data)
+        samples = np.frombuffer(data, dtype=np.int16)
+        all_data_buffer.extend(samples.tolist())
 
-root = Tk()
-FeetToMeters(root)
+        elapsed = time.time() - start
+        if elapsed >= 1:
+            try:
+                with wave.open('output_raw.wav', 'wb') as wf:
+                    wf.setnchannels(num_channels)
+                    wf.setsampwidth(sample_width)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(b''.join(frames))
+                log_message(f"Recorded {int(elapsed)} seconds.")
+                start = time.time()
+            except Exception as e:
+                log_message(f"Error writing raw WAV: {e}")
+
+    # Cleanup
+    try:
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+    except:
+        pass
+
+    # Final save of raw WAV
+    try:
+        with wave.open('output_raw.wav', 'wb') as wf:
+            wf.setnchannels(num_channels)
+            wf.setsampwidth(sample_width)
+            wf.setframerate(sample_rate)
+            wf.writeframes(b''.join(frames))
+        log_message("Raw recording saved as output_raw.wav.")
+    except Exception as e:
+        log_message(f"Error saving raw WAV: {e}")
+
+    # Process audio
+    try:
+        signalprocessing.process_audio('output_raw.wav')
+        processed_file = signalprocessing.output_file_name
+        log_message(f"Audio processed -> {processed_file}")
+    except Exception as e:
+        log_message(f"Error in signalprocessing: {e}")
+
+    # Plot
+    root.after(0, plot_subplots)
+
+    audio_queue.append("Recording complete")
+    recording = False
+
+# --- Playback last recording (raw) ---
+def play_audio():
+    log_message("Playback raw recording started...")
+    try:
+        wf = wave.open('output_raw.wav', 'rb')
+    except FileNotFoundError:
+        log_message("ERROR: No raw recording found to play.")
+        return
+
+    p = pyaudio.PyAudio()
+    try:
+        stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True)
+        data = wf.readframes(CHUNK)
+        while data:
+            stream.write(data)
+            data = wf.readframes(CHUNK)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        wf.close()
+        log_message("Playback raw finished.")
+    except Exception as e:
+        log_message(f"Playback error: {e}")
+
+# --- Playback processed recording ---
+def play_processed_audio():
+    log_message("Playback processed recording started...")
+    processed_file = signalprocessing.output_file_name
+    try:
+        wf = wave.open(processed_file, 'rb')
+    except FileNotFoundError:
+        log_message("ERROR: No processed recording found to play.")
+        return
+
+    p = pyaudio.PyAudio()
+    try:
+        stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True)
+        data = wf.readframes(CHUNK)
+        while data:
+            stream.write(data)
+            data = wf.readframes(CHUNK)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        wf.close()
+        log_message("Playback processed finished.")
+    except Exception as e:
+        log_message(f"Playback processed error: {e}")
+
+# --- Start/Stop controls ---
+def start_recording():
+    global recording
+    if not recording:
+        recording = True
+        Thread(target=record_audio, daemon=True).start()
+
+
+def stop_recording():
+    global recording
+    recording = False
+    log_message("Recording stopped.")
+
+# --- Analyze using ML script on processed file ---
+def analyze_audio():
+    age_str = age_entry.get().strip()
+    if not age_str.isdigit():
+        log_message("Please enter a valid age (numeric).")
+        return
+    gender = gender_var.get().lower()
+    if gender not in ["male", "female"]:
+        log_message("Please select Male or Female.")
+        return
+
+    wav_file = signalprocessing.output_file_name
+    cmd = [sys.executable, 'rfcmodel.py', wav_file, age_str, gender]
+    log_message(f"Running ML: {' '.join(cmd)}")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        log_message(res.stdout)
+        if res.stderr:
+            log_message(res.stderr)
+    except Exception as e:
+        log_message(f"ML error: {e}")
+
+# --- GUI Setup ---
+root = tk.Tk()
+root.title("Dysphagia Detection Device")
+
+# Title Label
+tk.Label(root, text="Dysphagia Detection Device", font=("Arial", 14)).pack(pady=10)
+
+# Top Control Buttons Frame
+top_frame = tk.Frame(root)
+top_frame.pack(pady=5)
+tk.Button(top_frame, text="Start Recording", command=start_recording, bg="green", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+tk.Button(top_frame, text="Stop Recording", command=stop_recording, bg="red", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+
+# Play Buttons Frame
+play_frame = tk.Frame(root)
+play_frame.pack(pady=5)
+tk.Button(play_frame, text="Play Raw Audio", command=play_audio, bg="blue", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+tk.Button(play_frame, text="Play Processed Audio", command=play_processed_audio, bg="purple", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+
+# Quit Button
+tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=5)
+
+# Gender Selection
+gender_frame = tk.Frame(root)
+gender_frame.pack(pady=10)
+tk.Label(gender_frame, text="Select Biological Sex:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0,10))
+gender_var = tk.StringVar(value="N/A")
+tk.Radiobutton(gender_frame, text="Male", variable=gender_var, value="Male", font=("Arial",12)).pack(side=tk.LEFT)
+tk.Radiobutton(gender_frame, text="Female", variable=gender_var, value="Female", font=("Arial",12)).pack(side=tk.LEFT)
+tk.Radiobutton(gender_frame, text="N/A", variable=gender_var, value="N/A", font=("Arial",12)).pack(side=tk.LEFT)
+
+# Age Entry & Analyze Button
+analysis_frame = tk.Frame(root)
+analysis_frame.pack(pady=10)
+tk.Label(analysis_frame, text="Enter Age:", font=("Arial",12)).pack(side=tk.LEFT, padx=(0,10))
+age_entry = tk.Entry(analysis_frame, font=("Arial",12), width=5)
+age_entry.pack(side=tk.LEFT)
+tk.Button(analysis_frame, text="Analyze", command=analyze_audio, font=("Arial",12)).pack(side=tk.LEFT, padx=10)
+
+# Status pane for log messages
+status_frame = tk.Frame(root)
+status_frame.pack(fill=tk.BOTH, expand=False, padx=10, pady=5)
+status_text = scrolledtext.ScrolledText(status_frame, height=8, state='disabled', font=("Arial", 10))
+status_text.pack(fill=tk.BOTH, expand=True)
+
 root.mainloop()
