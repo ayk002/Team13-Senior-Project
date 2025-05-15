@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import soundfile as sf
+import os
 from IPython.display import Audio
 
 #  change line 48 to the path of the datafile that trains the model 
@@ -51,9 +52,16 @@ def main():
     '''
     training the model 
     '''
-    df = pd.read_csv("/Users/jadeybabey/Desktop/SENIOR DESIGN/Machine Learning Model/10.16.24 Swallow Analysis_second_prototype_data.csv")
+    # df = pd.read_csv("/Users/jadeybabey/Desktop/SENIOR DESIGN/Machine Learning Model/10.16.24 Swallow Analysis_second_prototype_data.csv")
     # order of features: age	male	Number of swallows	Total Length (s):	Number of swallows	Swallow #	Length (s)	Swallow_attempts	Peak Amplitude	Average Amplitude	Amplitude^2	Average Amplitude^2	Area under curve	Average Area under curve	Average Frequency	Median Frequency	label	freq1	freq2	freq3	freq4	freq5
     # number of features: 22
+
+    # Get the directory where this script lives
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    # Build a path to the CSV in the same folder
+    csv_path = os.path.join(BASE_DIR, "10.16.24 Swallow Analysis_second_prototype_data.csv")
+    # Now read it
+    df = pd.read_csv(csv_path)
 
     X = df.drop(columns=['label'])  # All columns except the target
     y = df['label']
