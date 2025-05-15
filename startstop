@@ -1,32 +1,32 @@
+import os
 import wave
 import time
 import numpy as np
 import tkinter as tk
 from tkinter import scrolledtext  # for status display
 from threading import Thread
-import subprocess  # for calling ML script
-import sys         # to use the same interpreter
-import pyaudio     # for real audio capture and playback
+import subprocess
+import sys
+import pyaudio  # for audio capture and playback
 import signalprocessing  # custom processing module
 
-# Parameters for audio
-sample_rate = 44100  # Hz
-sample_width = 2     # 16-bit audio
-num_channels = 1     # Mono audio
-CHUNK = 1024         # Audio buffer size for recording/playback
+# Audio parameters
+sample_rate = 44100
+sample_width = 2
+num_channels = 1
+CHUNK = 1024
 
 # Globals
-recording = False            # Control recording state
-audio_queue = []             # Notify GUI
-all_data_buffer = []         # Store raw samples for plotting
-teensy_device_index = None   # Will hold the PyAudio index of the Teensy device
-status_text = None           # Will reference the GUI text widget for logs
+recording = False
+raw_filename = None
+processed_filename = None
+audio_queue = []
+all_data_buffer = []
+teensy_device_index = None
+status_text = None
 
 
 def log_message(message):
-    """
-    Log a message with timestamp to the GUI status pane.
-    """
     timestamped = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}\n"
     global status_text
     if status_text:
@@ -47,7 +47,7 @@ def find_teensy_device(p):
             return i
     return None
 
-# --- Plotting raw waveform and spectrum as subplots ---
+
 def plot_subplots():
     import matplotlib.pyplot as plt
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
@@ -73,32 +73,47 @@ def plot_subplots():
     plt.tight_layout()
     plt.show()
 
-# --- Recording real audio and saving raw WAV ---
+
 def record_audio():
-    global recording, all_data_buffer, teensy_device_index
+    global recording, raw_filename, processed_filename, all_data_buffer, teensy_device_index
     log_message("Recording started—attempting Teensy...")
+
+    # Build filenames from GUI inputs
+    first = first_name_entry.get().strip().replace(' ', '')
+    last = last_name_entry.get().strip().replace(' ', '')
+    gender = gender_var.get().lower()
+    age = age_entry.get().strip()
+    base = f"{first}{last}_{gender}_{age}"
+    raw_filename = f"{base}_raw.wav"
+    processed_filename = f"{base}_processed.wav"
 
     p = pyaudio.PyAudio()
     if teensy_device_index is None:
         teensy_device_index = find_teensy_device(p)
-        if teensy_device_index is None:
-            log_message("ERROR: Teensy USB-Audio device not found. Recording aborted.")
-            recording = False
-            p.terminate()
-            return
-        else:
+        if teensy_device_index is not None:
             info = p.get_device_info_by_index(teensy_device_index)
             log_message(f"Teensy found: index={teensy_device_index}, name='{info['name']}'")
+        else:
+            log_message("WARNING: Teensy USB-Audio device not found. Using default input device.")
 
     try:
-        stream = p.open(format=pyaudio.paInt16,
-                        channels=num_channels,
-                        rate=sample_rate,
-                        input=True,
-                        frames_per_buffer=CHUNK,
-                        input_device_index=teensy_device_index)
+        if teensy_device_index is not None:
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=num_channels,
+                            rate=sample_rate,
+                            input=True,
+                            frames_per_buffer=CHUNK,
+                            input_device_index=teensy_device_index)
+        else:
+            default_info = p.get_default_input_device_info()
+            log_message(f"Using default input device: {default_info['name']}")
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=num_channels,
+                            rate=sample_rate,
+                            input=True,
+                            frames_per_buffer=CHUNK)
     except Exception as e:
-        log_message(f"ERROR: Unable to open Teensy audio stream: {e}")
+        log_message(f"ERROR: Unable to open audio stream: {e}")
         recording = False
         p.terminate()
         return
@@ -120,12 +135,12 @@ def record_audio():
         elapsed = time.time() - start
         if elapsed >= 1:
             try:
-                with wave.open('output_raw.wav', 'wb') as wf:
+                with wave.open(raw_filename, 'wb') as wf:
                     wf.setnchannels(num_channels)
                     wf.setsampwidth(sample_width)
                     wf.setframerate(sample_rate)
                     wf.writeframes(b''.join(frames))
-                log_message(f"Recorded {int(elapsed)} seconds from Teensy.")
+                log_message(f"Recorded {int(elapsed)} seconds to {raw_filename}.")
                 start = time.time()
             except Exception as e:
                 log_message(f"Error writing raw WAV: {e}")
@@ -137,20 +152,26 @@ def record_audio():
     except:
         pass
 
+    # Final raw save
     try:
-        with wave.open('output_raw.wav', 'wb') as wf:
+        with wave.open(raw_filename, 'wb') as wf:
             wf.setnchannels(num_channels)
             wf.setsampwidth(sample_width)
             wf.setframerate(sample_rate)
             wf.writeframes(b''.join(frames))
-        log_message("Raw recording saved as output_raw.wav.")
+        log_message(f"Raw recording saved as {raw_filename}.")
     except Exception as e:
         log_message(f"Error saving raw WAV: {e}")
 
+    # Process and rename processed file
     try:
-        signalprocessing.process_audio('output_raw.wav')
-        processed_file = signalprocessing.output_file_name
-        log_message(f"Audio processed -> {processed_file}")
+        signalprocessing.process_audio(raw_filename)
+        orig = signalprocessing.output_file_name
+        if os.path.exists(orig):
+            os.replace(orig, processed_filename)
+            log_message(f"Processed recording saved as {processed_filename}.")
+        else:
+            log_message(f"ERROR: Expected processed file {orig} not found.")
     except Exception as e:
         log_message(f"Error in signalprocessing: {e}")
 
@@ -159,15 +180,13 @@ def record_audio():
     audio_queue.append("Recording complete")
     recording = False
 
-# --- Playback last recording ---
-def play_audio():
-    log_message("Playback started...")
-    try:
-        wf = wave.open('output_raw.wav', 'rb')
-    except FileNotFoundError:
-        log_message("ERROR: No recording found to play.")
-        return
 
+def play_audio():
+    log_message("Playback raw recording started...")
+    if not raw_filename or not os.path.exists(raw_filename):
+        log_message("ERROR: No raw recording found to play.")
+        return
+    wf = wave.open(raw_filename, 'rb')
     p = pyaudio.PyAudio()
     try:
         stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
@@ -180,13 +199,38 @@ def play_audio():
             data = wf.readframes(CHUNK)
         stream.stop_stream()
         stream.close()
-        p.terminate()
         wf.close()
-        log_message("Playback finished.")
+        p.terminate()
+        log_message("Playback raw finished.")
     except Exception as e:
         log_message(f"Playback error: {e}")
 
-# --- Start/Stop/Play controls ---
+
+def play_processed_audio():
+    log_message("Playback processed recording started...")
+    if not processed_filename or not os.path.exists(processed_filename):
+        log_message("ERROR: No processed recording found to play.")
+        return
+    wf = wave.open(processed_filename, 'rb')
+    p = pyaudio.PyAudio()
+    try:
+        stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True)
+        data = wf.readframes(CHUNK)
+        while data:
+            stream.write(data)
+            data = wf.readframes(CHUNK)
+        stream.stop_stream()
+        stream.close()
+        wf.close()
+        p.terminate()
+        log_message("Playback processed finished.")
+    except Exception as e:
+        log_message(f"Playback processed error: {e}")
+
+
 def start_recording():
     global recording
     if not recording:
@@ -199,7 +243,7 @@ def stop_recording():
     recording = False
     log_message("Recording stopped.")
 
-# --- Analyze using ML script on processed file ---
+
 def analyze_audio():
     age_str = age_entry.get().strip()
     if not age_str.isdigit():
@@ -210,9 +254,10 @@ def analyze_audio():
         log_message("Please select Male or Female.")
         return
 
-    wav_file = signalprocessing.output_file_name
-    #wav_file = 'output_Sp.wav'
-    cmd = [sys.executable, 'rfcmodel.py', wav_file, age_str, gender]
+    if not processed_filename or not os.path.exists(processed_filename):
+        log_message("ERROR: No processed file to analyze.")
+        return
+    cmd = [sys.executable, 'rfcmodel_fixed_parameters.py', processed_filename, age_str, gender]
     log_message(f"Running ML: {' '.join(cmd)}")
     try:
         res = subprocess.run(cmd, capture_output=True, text=True)
@@ -222,28 +267,48 @@ def analyze_audio():
     except Exception as e:
         log_message(f"ML error: {e}")
 
-# --- GUI Setup ---
+# --- GUI ---
 root = tk.Tk()
 root.title("Dysphagia Detection Device")
 
-# Title Label
+# Title
 tk.Label(root, text="Dysphagia Detection Device", font=("Arial", 14)).pack(pady=10)
 
+# User Name Input
+name_frame = tk.Frame(root)
+name_frame.pack(pady=5)
+tk.Label(name_frame, text="First Name:", font=("Arial", 12)).pack(side=tk.LEFT)
+first_name_entry = tk.Entry(name_frame, font=("Arial", 12), width=10)
+first_name_entry.pack(side=tk.LEFT, padx=5)
+tk.Label(name_frame, text="Last Name:", font=("Arial", 12)).pack(side=tk.LEFT)
+last_name_entry = tk.Entry(name_frame, font=("Arial", 12), width=10)
+last_name_entry.pack(side=tk.LEFT, padx=5)
+
 # Control Buttons
-tk.Button(root, text="Start Recording", command=start_recording, bg="green", font=("Arial", 12)).pack(pady=5)
-tk.Button(root, text="Stop Recording", command=stop_recording, bg="red", font=("Arial", 12)).pack(pady=5)
-# NEW Play button
-tk.Button(root, text="Play Recording", command=play_audio, bg="blue", fg="white", font=("Arial", 12)).pack(pady=5)
+top_frame = tk.Frame(root)
+top_frame.pack(pady=5)
+tk.Button(top_frame, text="Start Recording", command=start_recording, bg="green", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+tk.Button(top_frame, text="Stop Recording", command=stop_recording, bg="red", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+
+# Playback & Waveform Buttons
+play_frame = tk.Frame(root)
+play_frame.pack(pady=5)
+tk.Button(play_frame, text="Play Raw Audio", command=play_audio, bg="blue", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+tk.Button(play_frame, text="Play Processed Audio", command=play_processed_audio, bg="purple", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+tk.Button(play_frame, text="Show Waveform", command=plot_subplots, bg="orange", fg="black", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+
+# Quit Button
 tk.Button(root, text="Quit", command=root.quit, font=("Arial", 12)).pack(pady=5)
 
 # Gender Selection
 gender_frame = tk.Frame(root)
 gender_frame.pack(pady=10)
+# Default to Male selected
+gender_var = tk.StringVar(value="Male")
 tk.Label(gender_frame, text="Select Biological Sex:", font=("Arial", 12)).pack(side=tk.LEFT, padx=(0,10))
-gender_var = tk.StringVar(value="N/A")
+# Only Male and Female options
 tk.Radiobutton(gender_frame, text="Male", variable=gender_var, value="Male", font=("Arial",12)).pack(side=tk.LEFT)
 tk.Radiobutton(gender_frame, text="Female", variable=gender_var, value="Female", font=("Arial",12)).pack(side=tk.LEFT)
-tk.Radiobutton(gender_frame, text="N/A", variable=gender_var, value="N/A", font=("Arial",12)).pack(side=tk.LEFT)
 
 # Age Entry & Analyze Button
 analysis_frame = tk.Frame(root)
